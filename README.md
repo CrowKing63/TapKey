@@ -59,6 +59,16 @@ A 2×3 overlay at the double-tap point:
 - **Multi-monitor aware:** overlays stay on the tapped monitor; drag replay spans
   the whole virtual desktop.
 
+## Demo
+
+Double-tap a spot → the overlay appears → tap a button. Recorded live on Windows:
+
+| Right-click | Scroll up / down | Drag (plan → replay) |
+|---|---|---|
+| ![Right-click demo](docs/assets/demos/rclick.gif) | ![Scroll demo](docs/assets/demos/scroll.gif) | ![Drag demo](docs/assets/demos/drag.gif) |
+
+Higher-quality videos: [right-click](docs/assets/demos/rclick.mp4) · [scroll](docs/assets/demos/scroll.mp4) · [drag](docs/assets/demos/drag.mp4).
+
 ## How it works
 
 ```

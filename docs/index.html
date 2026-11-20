@@ -120,6 +120,16 @@
   .demo-copy li { padding: 7px 0 7px 26px; position: relative; font-size: 14.5px; }
   .demo-copy li::before { content: "◆"; position: absolute; left: 2px; color: var(--accent); font-size: 11px; top: 10px; }
 
+  .videos { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .vcard {
+    background: var(--panel); border: 1px solid rgba(196,181,253,.14);
+    border-radius: var(--radius); overflow: hidden;
+  }
+  .vcard video { width: 100%; display: block; aspect-ratio: 880/740; background: #0d0819; }
+  .vcard .vbody { padding: 14px 18px 16px; }
+  .vcard h3 { font-size: 15px; margin-bottom: 4px; }
+  .vcard p { font-size: 13px; color: var(--muted); }
+
   .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
   .card { background: var(--panel); border: 1px solid rgba(196,181,253,.14); border-radius: var(--radius); padding: 22px; }
   .card h3 { font-size: 16px; margin-bottom: 6px; color: var(--accent); }
@@ -140,6 +150,7 @@
   }
   @media (max-width: 720px) {
     .steps, .cards { grid-template-columns: 1fr; }
+    .videos { grid-template-columns: 1fr; }
     .demo { grid-template-columns: 1fr; }
     .hero { padding: 40px 0 28px; }
     nav { gap: 14px; }
@@ -153,6 +164,7 @@
     <a class="brand" href="#"><img src="assets/tapkey-icon.png" alt="">TapKey</a>
     <nav>
       <a href="#how">How it works</a>
+      <a href="#demos">Demos</a>
       <a href="#features">Features</a>
       <a href="#build">Build</a>
       <a href="https://github.com/CrowKing63/TapKey">GitHub</a>
@@ -236,6 +248,34 @@
           <li><strong>Drag</strong> opens a teal D-pad: plan a path with direction taps, drop it, and it replays as a real held-button drag.</li>
           <li>Tap outside the panel — or just wait — and it disappears.</li>
         </ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="demos">
+    <h2>See it in action</h2>
+    <p class="lead">Recorded live on Windows — double-tap a spot, tap a button, done.</p>
+    <div class="videos">
+      <div class="vcard">
+        <video src="assets/demos/rclick.mp4" autoplay muted loop playsinline></video>
+        <div class="vbody">
+          <h3>Right-click</h3>
+          <p>Context menu exactly where you double-tapped. One-shot actions close the panel automatically.</p>
+        </div>
+      </div>
+      <div class="vcard">
+        <video src="assets/demos/scroll.mp4" autoplay muted loop playsinline></video>
+        <div class="vbody">
+          <h3>Scroll up &amp; down</h3>
+          <p>Two notches per tap. The panel stays open for repeat taps, and the cursor returns afterwards.</p>
+        </div>
+      </div>
+      <div class="vcard">
+        <video src="assets/demos/drag.mp4" autoplay muted loop playsinline></video>
+        <div class="vbody">
+          <h3>Drag</h3>
+          <p>Plan a path on the D-pad — the dot follows — then Drop replays it as a real held-button drag.</p>
+        </div>
       </div>
     </div>
   </section>
