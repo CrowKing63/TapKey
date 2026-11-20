@@ -1,0 +1,6 @@
+src/tapkey/target/
+src/taplogger/target/
+src/TapKey.PoC/bin/
+src/TapKey.PoC/obj/
+src/TapKey.PoC/publish/
+logs/

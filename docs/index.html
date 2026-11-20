@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TapKey — Right-click, scroll and drag, by touch</title>
+<meta name="description" content="A tiny Windows tray utility that adds a touch-friendly mouse overlay to Moonlight streaming. Double-tap anywhere, get right-click, scroll, drag and more at that spot.">
+<meta property="og:title" content="TapKey">
+<meta property="og:description" content="Right-click, scroll and drag — by touch. A touch-friendly mouse overlay for Moonlight streaming on Windows.">
+<meta property="og:image" content="assets/tapkey-icon.png">
+<link rel="icon" type="image/png" href="assets/tapkey-icon.png">
+<style>
+  :root {
+    --bg: #120b26;
+    --panel: #1a1033;
+    --tile: #453670;
+    --accent: #c4b5fd;
+    --accent-deep: #a78bfa;
+    --ink: #f1edfa;
+    --muted: #a99fc4;
+    --dark-on-accent: #2a1b4d;
+    --teal: #2dd4bf;
+    --radius: 20px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    font-family: Consolas, "Cascadia Mono", monospace; font-size: .92em;
+    background: rgba(196,181,253,.1); padding: 1px 6px; border-radius: 6px;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 0 24px; }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 20px 0;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; color: var(--ink); }
+  .brand img { width: 30px; height: 30px; border-radius: 8px; }
+  .brand:hover { text-decoration: none; }
+  nav { display: flex; gap: 22px; font-size: 14px; }
+  nav a { color: var(--muted); }
+  nav a:hover { color: var(--accent); text-decoration: none; }
+
+  .hero { text-align: center; padding: 64px 0 48px; }
+  .hero img { width: 112px; height: 112px; border-radius: 26px; box-shadow: 0 12px 48px rgba(167,139,250,.25); }
+  .hero h1 { font-size: clamp(30px, 5vw, 44px); line-height: 1.15; margin: 26px 0 14px; letter-spacing: -0.5px; }
+  .hero h1 em { font-style: normal; color: var(--accent); }
+  .hero p.sub { color: var(--muted); font-size: 17px; max-width: 560px; margin: 0 auto 30px; }
+  .cta { display: inline-flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+  .btn {
+    display: inline-block; padding: 12px 26px; border-radius: 12px; font-weight: 600; font-size: 15px;
+    background: var(--accent); color: var(--dark-on-accent);
+  }
+  .btn:hover { filter: brightness(1.08); text-decoration: none; }
+  .btn.ghost { background: transparent; color: var(--accent); border: 1.5px solid rgba(196,181,253,.45); }
+
+  section { padding: 44px 0; }
+  h2 { font-size: 24px; margin-bottom: 8px; letter-spacing: -0.3px; }
+  .lead { color: var(--muted); margin-bottom: 26px; max-width: 640px; }
+
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .step {
+    background: var(--panel); border: 1px solid rgba(196,181,253,.14);
+    border-radius: var(--radius); padding: 22px;
+  }
+  .step .n {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px; border-radius: 9px; background: var(--tile);
+    color: var(--accent); font-weight: 700; font-size: 14px; margin-bottom: 12px;
+  }
+  .step h3 { font-size: 16px; margin-bottom: 6px; }
+  .step p { font-size: 14px; color: var(--muted); }
+
+  .demo { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; align-items: center; }
+  .stream {
+    position: relative; border-radius: var(--radius); overflow: hidden; min-height: 460px;
+    background:
+      radial-gradient(420px 260px at 75% 20%, rgba(45,212,191,.14), transparent 60%),
+      radial-gradient(500px 320px at 20% 85%, rgba(167,139,250,.16), transparent 60%),
+      linear-gradient(160deg, #241740, #171029);
+    border: 1px solid rgba(196,181,253,.16);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .stream .caption {
+    position: absolute; top: 14px; left: 16px; font-size: 12px; color: var(--muted);
+    background: rgba(18,11,38,.55); padding: 3px 10px; border-radius: 8px;
+  }
+  .panel {
+    width: 224px; padding: 12px 16px; border-radius: var(--radius);
+    background: rgba(26,16,51,.62); backdrop-filter: blur(3px);
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+    box-shadow: 0 16px 48px rgba(0,0,0,.4);
+  }
+  .key {
+    aspect-ratio: 1; border-radius: 4px; background: rgba(69,54,112,.72);
+    border: 1px solid rgba(196,181,253,.25);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px;
+    color: var(--ink); font-size: 11.5px; font-weight: 600;
+  }
+  .key svg { width: 26px; height: 26px; stroke: var(--ink); fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .key.pressed { background: var(--accent); color: var(--dark-on-accent); border-color: transparent; }
+  .key.pressed svg { stroke: var(--dark-on-accent); }
+  .dot {
+    position: absolute; width: 18px; height: 18px; border-radius: 50%;
+    background: var(--accent-deep); opacity: .9; left: calc(50% - 148px); top: 52%;
+    box-shadow: 0 0 0 4px rgba(167,139,250,.2);
+  }
+  .demo-copy h2 { margin-bottom: 10px; }
+  .demo-copy p { color: var(--muted); font-size: 15px; margin-bottom: 14px; }
+  .demo-copy ul { list-style: none; }
+  .demo-copy li { padding: 7px 0 7px 26px; position: relative; font-size: 14.5px; }
+  .demo-copy li::before { content: "◆"; position: absolute; left: 2px; color: var(--accent); font-size: 11px; top: 10px; }
+
+  .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+  .card { background: var(--panel); border: 1px solid rgba(196,181,253,.14); border-radius: var(--radius); padding: 22px; }
+  .card h3 { font-size: 16px; margin-bottom: 6px; color: var(--accent); }
+  .card p { font-size: 14px; color: var(--muted); }
+
+  pre {
+    background: #0d0819; border: 1px solid rgba(196,181,253,.16); border-radius: 14px;
+    padding: 18px 20px; overflow-x: auto; font-size: 13.5px; line-height: 1.7;
+    font-family: Consolas, "Cascadia Mono", monospace; color: #d8d0ee;
+  }
+  pre .c { color: #7d7398; }
+  .note { font-size: 13.5px; color: var(--muted); margin-top: 12px; }
+
+  footer {
+    border-top: 1px solid rgba(196,181,253,.14); margin-top: 32px;
+    padding: 26px 0 40px; font-size: 13.5px; color: var(--muted);
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px;
+  }
+  @media (max-width: 720px) {
+    .steps, .cards { grid-template-columns: 1fr; }
+    .demo { grid-template-columns: 1fr; }
+    .hero { padding: 40px 0 28px; }
+    nav { gap: 14px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <a class="brand" href="#"><img src="assets/tapkey-icon.png" alt="">TapKey</a>
+    <nav>
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#build">Build</a>
+      <a href="https://github.com/CrowKing63/TapKey">GitHub</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <img src="assets/tapkey-icon.png" alt="TapKey icon">
+    <h1>Right-click, scroll and drag — <em>by touch.</em></h1>
+    <p class="sub">
+      Streaming your PC to an iPad with Moonlight? TapKey adds the mouse actions
+      touch is missing. Double-tap any spot, and a small overlay appears right there.
+      Single taps stay untouched.
+    </p>
+    <div class="cta">
+      <a class="btn" href="https://github.com/CrowKing63/TapKey">View on GitHub</a>
+      <a class="btn ghost" href="#build">Build it yourself</a>
+    </div>
+  </div>
+
+  <section id="how">
+    <h2>How it works</h2>
+    <p class="lead">TapKey lives in the Windows tray and watches the low-level mouse hook. No client fork, no fixed HUD.</p>
+    <div class="steps">
+      <div class="step">
+        <span class="n">1</span>
+        <h3>Tap normally</h3>
+        <p>Every single tap passes straight through to the app — zero delay, nothing swallowed.</p>
+      </div>
+      <div class="step">
+        <span class="n">2</span>
+        <h3>Double-tap a spot</h3>
+        <p>Two taps at the same point within 250&nbsp;ms open a translucent button panel next to it.</p>
+      </div>
+      <div class="step">
+        <span class="n">3</span>
+        <h3>Tap an action</h3>
+        <p>Right-click, scroll, hold, double-click or drag — executed exactly where you double-tapped.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="demo">
+      <div class="stream">
+        <span class="caption">your stream, with the overlay on top</span>
+        <span class="dot"></span>
+        <div class="panel" aria-label="Overlay illustration">
+          <div class="key">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 12V6.5"/></svg>
+            Hold2s
+          </div>
+          <div class="key pressed">
+            <svg viewBox="0 0 24 24"><rect x="7" y="3.5" width="10" height="17" rx="5"/><path d="M7 9.5h10"/></svg>
+            RClick
+          </div>
+          <div class="key">
+            <svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M12 3l-2.5 2.5M12 3l2.5 2.5M12 21l-2.5-2.5M12 21l2.5-2.5M3 12l2.5-2.5M3 12l2.5 2.5M21 12l-2.5-2.5M21 12l-2.5 2.5"/></svg>
+            Drag
+          </div>
+          <div class="key">
+            <svg viewBox="0 0 24 24"><path d="M5 14.5l7-7 7 7"/></svg>
+            Scr Up
+          </div>
+          <div class="key">
+            <svg viewBox="0 0 24 24"><circle cx="9.5" cy="12" r="6"/><circle cx="14.5" cy="12" r="6"/></svg>
+            DblClk
+          </div>
+          <div class="key">
+            <svg viewBox="0 0 24 24"><path d="M5 9.5l7 7 7-7"/></svg>
+            Scr Dn
+          </div>
+        </div>
+      </div>
+      <div class="demo-copy">
+        <h2>The overlay</h2>
+        <p>Six big, bold buttons on a see-through lavender panel — readable over the stream, sized for touch, viewed at a distance through a headset.</p>
+        <ul>
+          <li><strong>Scroll</strong> keeps the panel open for repeat taps and returns the cursor afterwards.</li>
+          <li><strong>One-shot actions</strong> (right-click, double-click, hold) close the panel automatically when done.</li>
+          <li><strong>Drag</strong> opens a teal D-pad: plan a path with direction taps, drop it, and it replays as a real held-button drag.</li>
+          <li>Tap outside the panel — or just wait — and it disappears.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="features">
+    <h2>Built for touch streaming</h2>
+    <p class="lead">Small, portable, and careful with your input.</p>
+    <div class="cards">
+      <div class="card">
+        <h3>Harmless by design</h3>
+        <p>Only the trigger tap is ever consumed. A false double-tap just shows a popup — one outside click dismisses it. Your clicks never get eaten or delayed.</p>
+      </div>
+      <div class="card">
+        <h3>Portable &amp; instant settings</h3>
+        <p>One ~400&nbsp;KB exe plus a <code>tapkey.toml</code> beside it. Tray tap opens the settings window; changes apply from the next tap and auto-save. The folder carries its settings.</p>
+      </div>
+      <div class="card">
+        <h3>Tuned on real data</h3>
+        <p>Trigger defaults come from 1119 measured Moonlight taps — frame-quantized timing, exact same-point coordinates. <a href="https://github.com/CrowKing63/TapKey/blob/master/docs/tap-signature.md">See the data</a>.</p>
+      </div>
+      <div class="card">
+        <h3>Multi-monitor aware</h3>
+        <p>The overlay stays on the monitor you tapped; drag replay spans the whole virtual desktop. Raw Win32 + Rust, no UI framework, no runtime to install.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="build">
+    <h2>Build &amp; run</h2>
+    <p class="lead">Windows 10/11 x64. Rust (GNU toolchain) with mingw-w64 <code>gcc</code> and <code>windres</code> on PATH.</p>
+<pre><span class="c"># kill any running tapkey first — the live exe locks the link</span>
+cd src/tapkey
+cargo build --release
+<span class="c"># run target/release/tapkey.exe — it starts in the tray</span></pre>
+    <p class="note">
+      Double-tap the same spot to open the overlay. Tray tap → settings (trigger window, tap radius, idle close, pause, quit).
+      Full instructions and design notes in the <a href="https://github.com/CrowKing63/TapKey#readme">README</a>.
+      Note: actions can't be injected into apps running as administrator unless TapKey is elevated too (Windows UIPI).
+    </p>
+  </section>
+
+  <footer>
+    <span>TapKey — MIT License</span>
+    <span>
+      <a href="https://github.com/CrowKing63/TapKey">GitHub</a> ·
+      <a href="https://github.com/CrowKing63/TapKey/blob/master/docs/spec.md">Design notes</a> ·
+      <a href="https://github.com/CrowKing63/TapKey/blob/master/docs/tap-signature.md">Tap data</a>
+    </span>
+  </footer>
+
+</div>
+</body>
+</html>
