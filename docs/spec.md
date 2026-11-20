@@ -10,8 +10,8 @@ Measured input data: [`tap-signature.md`](tap-signature.md).
 
 ## 1. Problem
 
-When a PC is controlled through Moonlight from a touch device (e.g. an iPad while
-wearing a Vision Pro as the display), touch input maps to the mouse — but
+When a PC is controlled through Moonlight from a touch device (e.g. the Moonlight
+app on an iPad), touch input maps to the mouse — but
 **right-click, wheel scroll and precise drag** are hard to perform with the built-in
 gestures:
 
@@ -180,8 +180,8 @@ Purple/lavender, accent **#C4B5FD**:
   alpha — both visibly see-through, so the streamed content behind stays readable.
 - Icons/labels white; pressed state = lavender fill + dark-purple icon.
 - Square buttons; only the panel has rounded corners (radius 20).
-- Touch targets ≥64 px, bold icons + short English labels (viewed at a distance
-  through a headset).
+- Touch targets ≥64 px, bold icons + short English labels (finger-sized targets
+  for touch input).
 
 **Auto-close summary:** global idle timer (default 8 s, layer-independent, reset by
 any button tap on any layer) + outside-click dismiss + one-shot action completion.

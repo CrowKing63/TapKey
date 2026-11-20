@@ -20,10 +20,10 @@
 
 ## Why
 
-When you control a PC through [Moonlight](https://moonlight-stream.org/) from a touch
-device — say, an iPad while wearing a Vision Pro as the display — touch maps to the
-mouse, but **right-click, wheel scroll and precise drag** are painful: long-press
-right-click is timing-sensitive, and there is no scroll at all in touch mode.
+When you control a PC through [Moonlight](https://moonlight-stream.org/) from an
+iPad, touch maps to the mouse, but **right-click, wheel scroll and precise drag**
+are painful: long-press right-click is timing-sensitive, and there is no scroll at
+all in touch mode.
 
 TapKey runs on the **PC side** and watches the mouse hook. Your single taps pass
 through untouched. **Double-tap the same spot** and a small translucent button panel
