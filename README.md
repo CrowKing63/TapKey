@@ -80,9 +80,15 @@ any other window. Architecture and implementation notes: [docs/spec.md](docs/spe
 - A Moonlight host setup (or any remote-input source that injects mouse events)
 - To build: Rust (GNU toolchain) + mingw-w64 `gcc`/`windres` on PATH
 
-## Build & run
+## Download & run
 
-No installer yet — build from source:
+Grab the latest `tapkey-*-windows-x64.zip` from [**Releases**](https://github.com/CrowKing63/TapKey/releases),
+unzip to any writable folder and run `tapkey.exe` — it starts in the tray. No installer, no runtime.
+
+> The exe is unsigned, so Windows SmartScreen may show an "unknown publisher" warning:
+> **More info → Run anyway**. Releases are built from the tagged source by GitHub Actions.
+
+## Build from source
 
 ```bash
 cd src/tapkey

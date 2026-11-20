@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # mingw-w64 gcc + windres (build.rs compiles icon.rc with windres)
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils
+
+      - name: Add mingw64 to PATH
+        shell: pwsh
+        run: |
+          Add-Content $env:GITHUB_PATH "${{ steps.msys2.outputs.msys2-location }}\mingw64\bin"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-gnu
+
+      - name: Sync crate version from tag
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF_NAME -replace '^v', ''
+          (Get-Content src/tapkey/Cargo.toml -Raw) -replace 'version = "[^"]+"', "version = `"$v`"" |
+            Set-Content src/tapkey/Cargo.toml -NoNewline
+
+      - name: Build
+        run: cargo +stable-x86_64-pc-windows-gnu build --release --manifest-path src/tapkey/Cargo.toml
+
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $stage = "stage/tapkey"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item src/tapkey/target/release/tapkey.exe $stage/
+          Copy-Item README.md, LICENSE $stage/
+          Compress-Archive -Path "$stage/*" -DestinationPath "tapkey-$tag-windows-x64.zip"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: tapkey-*-windows-x64.zip
+          generate_release_notes: true
+          body: |
+            Portable Windows x64 build — unzip to any writable folder and run `tapkey.exe` (it starts in the tray).
+            Built from this tag by GitHub Actions.
+
+            Note: the exe is unsigned, so Windows SmartScreen may show an "unknown publisher" warning — choose **More info → Run anyway**.
