@@ -2,8 +2,8 @@
 //! as the overlay (WS_POPUP layered + per-pixel ARGB + coverage text + premultiplied blit).
 //!
 //! The tray is a pure launcher; ALL control lives here: double-tap window ±10 steppers
-//! (primary), tap radius ±1 (secondary), idle close ±500, detection pause/resume toggle,
-//! close, quit.
+//! (primary), tap radius ±1 (secondary), idle close ±500, move hold ±25 + scroll notches ±1
+//! (sensitivity), detection pause/resume toggle, close, quit.
 //! **Auto-save**: every change applies via config atomics AND persists to
 //! tapkey.toml immediately — no save button. A failed write shows a status and
 //! warns at exit; values stay live in memory either way.
@@ -27,7 +27,7 @@ use crate::overlay::{
 const SETTINGS_PANEL_BG: u32 = 0xFF1A1033; // solid dark purple
 const SETTINGS_BTN_FILL: u32 = 0xFF453670; // solid mid purple
 
-pub const SETTINGS_SIZE: (i32, i32) = (360, 388);
+pub const SETTINGS_SIZE: (i32, i32) = (360, 520);
 const FLASH_TIMER_ID: usize = 20; // pressed-flash auto-clear if LUP never reaches us
 const FLASH_MS: u32 = 250;
 const VALUE_LAVENDER: u32 = 0xFFC4B5FD;
@@ -38,8 +38,8 @@ static STATUS: AtomicU8 = AtomicU8::new(0); // 0 none, 2 auto-save failed (until
 
 // ---------- layout (physical px) ----------
 // Button order: 0 win-10, 1 win+10, 2 rad-1, 3 rad+1, 4 idle-500, 5 idle+500,
-// 6 pause toggle, 7 close, 8 quit.
-fn btn_rects() -> [(f64, f64, f64, f64); 9] {
+// 6 move-25, 7 move+25, 8 scroll-1, 9 scroll+1, 10 pause toggle, 11 close, 12 quit.
+fn btn_rects() -> [(f64, f64, f64, f64); 13] {
     [
         (234.0, 58.0, 52.0, 44.0),
         (294.0, 58.0, 52.0, 44.0),
@@ -47,15 +47,19 @@ fn btn_rects() -> [(f64, f64, f64, f64); 9] {
         (294.0, 126.0, 52.0, 44.0),
         (234.0, 194.0, 52.0, 44.0),
         (294.0, 194.0, 52.0, 44.0),
-        (16.0, 264.0, 328.0, 48.0),
-        (16.0, 328.0, 158.0, 48.0),
-        (186.0, 328.0, 158.0, 48.0),
+        (234.0, 262.0, 52.0, 44.0),
+        (294.0, 262.0, 52.0, 44.0),
+        (234.0, 330.0, 52.0, 44.0),
+        (294.0, 330.0, 52.0, 44.0),
+        (16.0, 392.0, 328.0, 48.0),
+        (16.0, 456.0, 158.0, 48.0),
+        (186.0, 456.0, 158.0, 48.0),
     ]
 }
 
-const ROW_Y: [f64; 3] = [52.0, 120.0, 188.0];
-const ROW_LABELS: [&str; 3] = ["Double-tap", "Tap radius", "Idle close"];
-const STEP_LABELS: [&str; 6] = ["-10", "+10", "-1", "+1", "-500", "+500"];
+const ROW_Y: [f64; 5] = [52.0, 120.0, 188.0, 256.0, 324.0];
+const ROW_LABELS: [&str; 5] = ["Double-tap", "Tap radius", "Idle close", "Move hold", "Scroll"];
+const STEP_LABELS: [&str; 10] = ["-10", "+10", "-1", "+1", "-500", "+500", "-25", "+25", "-1", "+1"];
 
 fn hit_test(p: POINT) -> Option<usize> {
     for (i, (x, y, w, h)) in btn_rects().iter().enumerate() {
@@ -82,7 +86,7 @@ fn repaint(hwnd: HWND) -> Result<()> {
     let rects = btn_rects();
     for (i, rect) in rects.iter().enumerate() {
         let is_p = flash as usize == i;
-        let state_fill = i == 6 && paused; // pause toggle shows lavender while paused
+        let state_fill = i == 10 && paused; // pause toggle shows lavender while paused
         let fill = if is_p || state_fill { BTN_PRESSED } else { SETTINGS_BTN_FILL };
         fill_rounded(&mut buf, w, h, *rect, BTN_RADIUS, fill);
         if !is_p && !state_fill {
@@ -107,8 +111,14 @@ fn repaint(hwnd: HWND) -> Result<()> {
         format!("{} ms", crate::config::double_tap_window_ms()),
         format!("{} px", crate::config::tap_radius_px()),
         format!("{} ms", crate::config::overlay_idle_ms()),
+        format!("{} ms", crate::config::move_hold_ms()),
+        format!(
+            "{} {}",
+            crate::config::scroll_notches(),
+            if crate::config::scroll_notches() == 1 { "notch" } else { "notches" }
+        ),
     ];
-    for r in 0..3 {
+    for r in 0..5 {
         let y = ROW_Y[r];
         push((16.0, y, 120.0, 56.0), ROW_LABELS[r].into(), ICON_WHITE);
         // Value box wide enough for "60000 ms" (94px @19px semibold) without touching
@@ -121,9 +131,9 @@ fn repaint(hwnd: HWND) -> Result<()> {
         }
     }
     let pause_label = if paused { "Resume detection" } else { "Pause detection" };
-    let pause_col = if flash == 6 || paused { ICON_DARK } else { ICON_WHITE };
-    push(rects[6], pause_label.into(), pause_col);
-    for (i, text) in [(7usize, "Close"), (8, "Quit")] {
+    let pause_col = if flash == 10 || paused { ICON_DARK } else { ICON_WHITE };
+    push(rects[10], pause_label.into(), pause_col);
+    for (i, text) in [(11usize, "Close"), (12, "Quit")] {
         let col = if flash as usize == i { ICON_DARK } else { ICON_WHITE };
         push(rects[i], text.into(), col);
     }
@@ -157,14 +167,18 @@ fn execute(hwnd: HWND, i: usize) {
         3 => { cfg::set_tap_radius_px(cfg::tap_radius_px() + 1); persist(); }
         4 => { cfg::set_overlay_idle_ms(cfg::overlay_idle_ms() as i32 - 500); persist(); }
         5 => { cfg::set_overlay_idle_ms(cfg::overlay_idle_ms() as i32 + 500); persist(); }
-        6 => {
+        6 => { cfg::set_move_hold_ms(cfg::move_hold_ms() as i32 - 25); persist(); }
+        7 => { cfg::set_move_hold_ms(cfg::move_hold_ms() as i32 + 25); persist(); }
+        8 => { cfg::set_scroll_notches(cfg::scroll_notches() - 1); persist(); }
+        9 => { cfg::set_scroll_notches(cfg::scroll_notches() + 1); persist(); }
+        10 => {
             let next = !cfg::detection_enabled();
             cfg::set_detection_enabled(next);
             crate::tray::update_icon();
             persist();
         }
-        7 => close_settings(hwnd),
-        8 => {
+        11 => close_settings(hwnd),
+        12 => {
             // Quit the whole app (quit lives here, not in a tray menu).
             if crate::overlay::is_visible() {
                 crate::overlay::dismiss_all("settings quit"); // releases any hold, hides the anchor dot

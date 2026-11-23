@@ -15,6 +15,8 @@ pub static DOUBLE_TAP_WINDOW_MS: AtomicU32 = AtomicU32::new(250);
 pub static TAP_RADIUS_PX: AtomicI32 = AtomicI32::new(0);
 pub static OVERLAY_IDLE_MS: AtomicU32 = AtomicU32::new(8000);
 pub static ANCHOR_DOT_PX: AtomicI32 = AtomicI32::new(20);
+pub static MOVE_HOLD_MS: AtomicU32 = AtomicU32::new(150); // move pulse dwell at the screen edge (sensitivity knob)
+pub static SCROLL_NOTCHES: AtomicI32 = AtomicI32::new(2); // wheel notches per scroll tap (sensitivity knob)
 pub static DETECTION_ENABLED: AtomicBool = AtomicBool::new(true); // global pause (≠ overlay-open DETECTION_ON)
 static SAVE_FAILED: AtomicBool = AtomicBool::new(false);
 
@@ -32,6 +34,12 @@ pub fn anchor_dot_px() -> i32 {
 }
 pub fn detection_enabled() -> bool {
     DETECTION_ENABLED.load(Ordering::Relaxed)
+}
+pub fn move_hold_ms() -> u32 {
+    MOVE_HOLD_MS.load(Ordering::Relaxed)
+}
+pub fn scroll_notches() -> i32 {
+    SCROLL_NOTCHES.load(Ordering::Relaxed)
 }
 
 pub fn set_double_tap_window_ms(v: i32) {
@@ -52,6 +60,16 @@ pub fn set_overlay_idle_ms(v: i32) {
 pub fn set_detection_enabled(v: bool) {
     DETECTION_ENABLED.store(v, Ordering::Relaxed);
     println!("config: detection_enabled = {v}");
+}
+pub fn set_move_hold_ms(v: i32) {
+    let v = v.clamp(50, 1000);
+    MOVE_HOLD_MS.store(v as u32, Ordering::Relaxed);
+    println!("config: move_hold_ms = {v}");
+}
+pub fn set_scroll_notches(v: i32) {
+    let v = v.clamp(1, 10);
+    SCROLL_NOTCHES.store(v, Ordering::Relaxed);
+    println!("config: scroll_notches = {v}");
 }
 
 /// Config file path: next to the exe (portable — the folder carries its settings).
@@ -104,16 +122,28 @@ pub fn load() {
             "detection_enabled" => {
                 DETECTION_ENABLED.store(v != "false", Ordering::Relaxed);
             }
-            _ => {} // future keys (drag_step_px, scroll_notches, ...) — ignore for now
+            "move_hold_ms" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    MOVE_HOLD_MS.store(n.clamp(50, 1000) as u32, Ordering::Relaxed);
+                }
+            }
+            "scroll_notches" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    SCROLL_NOTCHES.store(n.clamp(1, 10), Ordering::Relaxed);
+                }
+            }
+            _ => {} // future keys (drag_step_px, ...) — ignore for now
         }
     }
     println!(
-        "config: loaded {} (window={}ms radius={}px idle={}ms dot={}px detection={})",
+        "config: loaded {} (window={}ms radius={}px idle={}ms dot={}px move={}ms scroll={} notches detection={})",
         p.display(),
         double_tap_window_ms(),
         tap_radius_px(),
         overlay_idle_ms(),
         anchor_dot_px(),
+        move_hold_ms(),
+        scroll_notches(),
         if detection_enabled() { "on" } else { "paused" }
     );
 }
@@ -127,11 +157,15 @@ pub fn save() -> bool {
          tap_radius_px = {}\n\
          overlay_idle_ms = {}\n\
          anchor_dot_px = {}\n\
+         move_hold_ms = {}\n\
+         scroll_notches = {}\n\
          detection_enabled = {}\n",
         DOUBLE_TAP_WINDOW_MS.load(Ordering::Relaxed),
         TAP_RADIUS_PX.load(Ordering::Relaxed),
         OVERLAY_IDLE_MS.load(Ordering::Relaxed),
         ANCHOR_DOT_PX.load(Ordering::Relaxed),
+        MOVE_HOLD_MS.load(Ordering::Relaxed),
+        SCROLL_NOTCHES.load(Ordering::Relaxed),
         if DETECTION_ENABLED.load(Ordering::Relaxed) { "true" } else { "false" },
     );
     match std::fs::write(&p, text) {

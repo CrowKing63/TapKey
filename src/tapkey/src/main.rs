@@ -60,15 +60,27 @@ fn main() -> Result<()> {
     tray::install(msg_hwnd)?;
     println!("tapkey ready — tray-resident; double-tap opens the overlay, tray tap opens settings");
 
+    // Self-test mode: `tapkey --probe-move` drives the Move layer end-to-end (posted
+    // messages, no external input) and exits with a PASS/FAIL code.
+    if std::env::args().any(|a| a == "--probe-move") {
+        let cx = unsafe { GetSystemMetrics(SM_CXSCREEN) } / 2;
+        let cy = unsafe { GetSystemMetrics(SM_CYSCREEN) } / 2;
+        if let Some(h) = open_overlay(cx, cy) {
+            overlay::probe_arm(msg_hwnd, h);
+        }
+    }
+
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, None, 0, 0) == TRUE } {
         let m = msg.message;
         if m == hook::WM_TAPKEY_OPEN {
-            open_overlay(msg.wParam.0 as i32, msg.lParam.0 as i32);
+            let _ = open_overlay(msg.wParam.0 as i32, msg.lParam.0 as i32);
         } else if m == hook::WM_TAPKEY_OUTSIDE {
             overlay::dismiss_all("outside click"); // click outside the panel — close + reset detection
         } else if m == WM_TIMER && msg.hwnd == msg_hwnd && msg.wParam.0 == overlay::IDLE_TIMER_ID as usize {
             overlay::dismiss_all("idle"); // global idle — closes whichever layer is open
+        } else if m == WM_TIMER && msg.hwnd == msg_hwnd && msg.wParam.0 == overlay::PROBE_TIMER_ID as usize {
+            overlay::probe_tick(); // self-test state machine (`--probe-move`)
         } else if m == tray::taskbar_created() && m != 0 {
             let _ = tray::readd(); // explorer restarted — restore the icon
         }
@@ -84,18 +96,18 @@ fn main() -> Result<()> {
 }
 
 /// Open the main panel near anchor P (the double-tap point) and suspend detection.
-fn open_overlay(px: i32, py: i32) {
+fn open_overlay(px: i32, py: i32) -> Option<HWND> {
     overlay::set_anchor(px, py);
     let (x, y) = overlay::position_for_anchor(px, py);
     let h = match overlay::create_overlay(x, y) {
         Ok(h) => h,
-        Err(e) => { println!("overlay: create failed: {e:?}"); return; }
+        Err(e) => { println!("overlay: create failed: {e:?}"); return None; }
     };
     if overlay::repaint(h).is_err() {
         println!("overlay: first blit failed — closing panel");
         unsafe { let _ = DestroyWindow(h); }
         hook::detection_set(true);
-        return;
+        return None;
     }
     unsafe { ShowWindow(h, SW_SHOW); }
     overlay::set_visible(h); // outside-click dismiss targets this panel
@@ -103,4 +115,5 @@ fn open_overlay(px: i32, py: i32) {
     overlay::move_anchor(px, py);
     hook::detection_set(false);
     println!("overlay: open @ ({x},{y}), anchor P ({px},{py})");
+    Some(h)
 }

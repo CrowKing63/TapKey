@@ -5,13 +5,16 @@
 //! detection off while any layer is visible. Auto-close = the GLOBAL idle timer
 //! on the message window (config overlay_idle_ms, default 8s; layer-independent,
 //! resets on any button tap) + outside-click dismiss + one-shot action auto-close
-//! (right-click/double-click/hold-2s/drag-Drop; scroll keeps the panel). Esc exits the app.
+//! (right-click/hold-2s/drag-Drop; scroll and move keep the panel). Esc exits the app.
 //!
 //! Layers:
-//!   - main panel 224x318: hold / right-click / drag / scroll up / scroll down / double-click
+//!   - main panel 224x318: hold / right-click / drag / scroll up / scroll down / move
 //!   - D-pad layer 326x326: plan-then-replay drag — center starts/ends
 //!     planning, outer 8 extend the path; release replays it as one SendInput burst.
 //!     Deliberately different tone (teal) so the layer switch reads at a glance.
+//!   - Move layer 326x326: cross of four edge-pan arrows — each tap pulses the cursor
+//!     to that monitor's edge, holds it there briefly (edge-panning games pan while
+//!     the cursor sits at the edge), then restores it to the tap point. Repeatable.
 //!   - anchor dot: global topmost click-through marker at P (the double-tap point),
 //!     visible in all overlay modes.
 //!
@@ -21,7 +24,7 @@
 //! own color space. One UpdateLayeredWindow blit with per-pixel alpha
 //! (premultiplied).
 
-use std::sync::{atomic::{AtomicI32, AtomicIsize, AtomicU64, AtomicU8, Ordering}, Mutex};
+use std::sync::{atomic::{AtomicI32, AtomicIsize, AtomicU32, AtomicU64, AtomicU8, Ordering}, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::core::{Result, w};
@@ -33,6 +36,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 pub const OVERLAY_SIZE: (i32, i32) = (224, 318);
 pub const DPAD_SIZE: (i32, i32) = (326, 326);
+pub const MOVE_SIZE: (i32, i32) = (224, 224); // move layer — 2x2 grid (up/down row, left/right row), cells stay 90px like the D-pad
 pub const IDLE_TIMER_ID: u32 = 2;   // global idle close on the message window — layer-independent
 pub const HOLD_TIMER_ID: u32 = 3;   // dpad hold -> first repeat
 pub const REPEAT_TIMER_ID: u32 = 4; // dpad hold -> subsequent repeats
@@ -40,15 +44,17 @@ pub const HOLD2S_TIMER_ID: u32 = 5; // main 'hold-2s' button -> left-up after 2s
 pub const FLASH_TIMER_ID: u32 = 6;  // pressed-flash auto-clear if LUP never reaches the panel
 pub const RESTORE_TIMER_ID: u32 = 7; // return cursor to the tap point after a scroll action
 pub const ACTION_CLOSE_TIMER_ID: u32 = 8; // one-shot action complete -> auto-close the panel
+pub const MOVE_HOLD_TIMER_ID: u32 = 9; // move pulse: cursor parked at the screen edge, restore after dwell
+pub const PROBE_TIMER_ID: u32 = 10;    // self-test probe state machine tick (`--probe-move`)
 const HOLD_FIRST_MS: u32 = 400; // hold-to-repeat: delay before the first repeat
 const REPEAT_MS: u32 = 90;      // hold-to-repeat: interval between repeats
 const HOLD2S_MS: u32 = 2000;    // hold-2s button: left-down, wait 2s, left-up
+// Dwell at the screen edge per pulse — runtime-configurable sensitivity (config::MOVE_HOLD_MS).
 const FLASH_MS: u32 = 250;      // pressed-flash auto-clear deadline (LUP fallback)
 const RESTORE_MS: u32 = 150;    // cursor-return delay — must outlive the SendInput dispatch (cf. REPLAY_GUARD_MS)
 const ACTION_CLOSE_MS: u32 = 250; // one-shot auto-close delay — outlives the SendInput dispatch
 const DRAG_STEP_PX: i32 = 20;   // path extension per direction tap
 const REPLAY_STEP_MS: u64 = 15; // per-step delay when replaying a planned drag
-const SCROLL_NOTCHES: i16 = 2;  // wheel notches per scroll tap (±240)
 
 // Anchor dot (global marker at P) — diameter is configurable.
 fn anchor_size() -> i32 { crate::config::anchor_dot_px() } // diameter px (default 20)
@@ -67,10 +73,10 @@ struct Btn {
     rect: (f64, f64, f64, f64), // x, y, w, h
     label: &'static str,
     action: &'static str,
-    icon: u8, // 0=scroll-up 1=scroll-down 2=right-click 3=hold-2s 5=move/drag 6=double-click
+    icon: u8, // 0=scroll-up 1=scroll-down 2=right-click 3=hold-2s 5=drag 7=edge-move
 }
 
-/// 2 columns x 3 rows. Left column: hold, drag (D-pad entry), double-click.
+/// 2 columns x 3 rows. Left column: hold, drag (D-pad entry), move (edge-pan entry).
 /// Right column: right-click, scroll-up, scroll-down.
 fn buttons() -> [Btn; 6] {
     let bs = (OVERLAY_SIZE.0 as f64 - 2.0 * PAD_X - GAP) / 2.0; // 90, square
@@ -79,13 +85,13 @@ fn buttons() -> [Btn; 6] {
         Btn { rect: (PAD_X + bs + GAP, PAD_Y, bs, bs), label: "RClick", action: "right-click", icon: 2 },
         Btn { rect: (PAD_X, PAD_Y + bs + GAP, bs, bs), label: "Drag", action: "drag", icon: 5 },
         Btn { rect: (PAD_X + bs + GAP, PAD_Y + bs + GAP, bs, bs), label: "Scr Up", action: "scroll-up", icon: 0 },
-        Btn { rect: (PAD_X, PAD_Y + 2.0 * (bs + GAP), bs, bs), label: "DblClk", action: "double-click", icon: 6 },
+        Btn { rect: (PAD_X, PAD_Y + 2.0 * (bs + GAP), bs, bs), label: "Move", action: "move", icon: 7 },
         Btn { rect: (PAD_X + bs + GAP, PAD_Y + 2.0 * (bs + GAP), bs, bs), label: "Scr Dn", action: "scroll-down", icon: 1 },
     ]
 }
 
 static FLASH: AtomicU8 = AtomicU8::new(255); // main panel pressed button, 255 none
-// Actions deferred to button-up (right-click / scroll / double-click): executing on down moves the cursor to P,
+// Actions deferred to button-up (right-click / scroll): executing on down moves the cursor to P,
 // and Moonlight sends the user's release at cursor position — it would land on the target and
 // dismiss the context menu (or stray into the app) before we're done. hold-2s is NOT deferred:
 // the press must start immediately. 255 = none, otherwise a button index.
@@ -146,6 +152,7 @@ static DRAG_PATH: Mutex<Vec<(i32, i32)>> = Mutex::new(Vec::new()); // planned dr
 static ANCHOR_HWND: AtomicIsize = AtomicIsize::new(0); // global anchor dot window
 static MAIN_HWNDA: AtomicIsize = AtomicIsize::new(0);
 static DPAD_HWNDA: AtomicIsize = AtomicIsize::new(0); // dpad layer while open (0 = none)
+static MOVE_HWNDA: AtomicIsize = AtomicIsize::new(0); // move layer while open (0 = none)
 /// Currently visible layer (main or dpad) — the hook dismisses clicks outside it. 0 = none.
 static VISIBLE_HWND: AtomicIsize = AtomicIsize::new(0);
 static ANCHOR_X: AtomicI32 = AtomicI32::new(i32::MIN); // drag anchor P — unset until hook wiring
@@ -172,6 +179,49 @@ pub fn dpad_hit_test(p: POINT) -> Option<usize> {
         }
     }
     None
+}
+
+// ---------- Move layer (edge-pan) ----------
+
+/// 2x2 grid — row 1: up / down, row 2: left / right (no diagonals).
+/// 224x224 panel, 90px cells: (224 - 2*16 - 12)/2.
+fn move_cells() -> [DpadCell; 4] {
+    let bs = (MOVE_SIZE.0 as f64 - 2.0 * PAD_X - GAP) / 2.0; // 90, square — same cells as the D-pad
+    let p = PAD_X;
+    [
+        DpadCell { rect: (p, p, bs, bs), dir: 0 },                            // up     (1,1)
+        DpadCell { rect: (p + bs + GAP, p, bs, bs), dir: 3 },                 // down   (1,2)
+        DpadCell { rect: (p, p + bs + GAP, bs, bs), dir: 5 },                 // left   (2,1)
+        DpadCell { rect: (p + bs + GAP, p + bs + GAP, bs, bs), dir: 2 },      // right  (2,2)
+    ]
+}
+
+static MOVE_PRESSED: AtomicU8 = AtomicU8::new(255); // pressed cell (flash), 255 none
+// Pulse deferred to button-up: executing on down teleports the cursor to the screen edge,
+// and Moonlight delivers the tap's release at the CURRENT cursor position — it would land
+// outside the panel and dismiss the overlay mid-pulse (same reason as main-panel actions).
+static MOVE_PENDING: AtomicU8 = AtomicU8::new(255); // 255 none, otherwise a cell index
+static MOVE_TAP_X: AtomicI32 = AtomicI32::new(0); // tap point in SCREEN coords — the restore target
+static MOVE_TAP_Y: AtomicI32 = AtomicI32::new(0);
+static MOVE_HOLDING: AtomicU8 = AtomicU8::new(0); // 1 while the cursor is parked at the edge
+
+pub fn move_hit_test(p: POINT) -> Option<usize> {
+    for (i, c) in move_cells().iter().enumerate() {
+        let (x, y, w, h) = c.rect;
+        if (p.x as f64) >= x && (p.x as f64) < x + w && (p.y as f64) >= y && (p.y as f64) < y + h {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn move_dir_name(d: u8) -> &'static str {
+    match d {
+        0 => "up",
+        2 => "right",
+        3 => "down",
+        _ => "left",
+    }
 }
 
 /// Set the anchor P — the double-tap point; the dot follows it and all actions
@@ -202,7 +252,7 @@ fn mouse_send(dx: i32, dy: i32, flags: MOUSE_EVENT_FLAGS) {
     }
 }
 
-/// Wheel event at the current cursor position (SCROLL_NOTCHES notches per tap, sign per direction).
+/// Wheel event at the current cursor position (config::scroll_notches() notches per tap, sign per direction).
 fn wheel_send(delta: i16) {
     let mut input = INPUT::default();
     input.r#type = INPUT_MOUSE;
@@ -265,9 +315,193 @@ fn release_hold_if_active() {
     }
 }
 
+/// Move-layer action: pulse the cursor to the edge of the tapped monitor in `dir`, hold it
+/// there for the configured dwell (edge-panning games pan while the cursor sits at the edge),
+/// then restore the cursor to the tap point. Repeatable — no auto-close (like scroll).
+fn perform_move_action(hwnd: HWND, dir: u8) {
+    let tx = MOVE_TAP_X.load(Ordering::SeqCst); // from LBUTTONDOWN lparam — Moonlight may still be moving the physical cursor
+    let ty = MOVE_TAP_Y.load(Ordering::SeqCst);
+    let (ex, ey) = edge_point(dir, tx, ty);
+    let dwell = crate::config::move_hold_ms();
+    unsafe {
+        let _ = KillTimer(Some(hwnd), MOVE_HOLD_TIMER_ID as usize); // rapid taps restart the dwell
+        let _ = SetCursorPos(ex, ey); // immediate — polling games see the edge during the hold
+        let _ = SetTimer(Some(hwnd), MOVE_HOLD_TIMER_ID as usize, dwell, None);
+    }
+    // Input-stream move for message/raw-input tracking: dispatches after this handler returns,
+    // when the cursor is already at the edge (positionally a no-op, event still delivered).
+    let (nx, ny) = norm_virtual(ex, ey);
+    mouse_send_abs(nx, ny, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE);
+    MOVE_HOLDING.store(1, Ordering::SeqCst);
+    println!("move: {} -> edge ({ex},{ey}), hold {dwell}ms, restore to ({tx},{ty})", move_dir_name(dir));
+}
+
+/// Restore after the dwell: back to the tap point (polling) + input-stream move (message tracking).
+fn do_move_restore() {
+    MOVE_HOLDING.store(0, Ordering::SeqCst);
+    let tx = MOVE_TAP_X.load(Ordering::SeqCst);
+    let ty = MOVE_TAP_Y.load(Ordering::SeqCst);
+    let mut cp = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut cp); // self-check: where the cursor actually sat during the hold
+        let _ = SetCursorPos(tx, ty);
+    }
+    let (nx, ny) = norm_virtual(tx, ty);
+    mouse_send_abs(nx, ny, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE);
+    println!("move: restored to ({tx},{ty}) [held at ({},{})]", cp.x, cp.y);
+}
+
+/// If a pulse is mid-hold (cursor parked at the screen edge), bring it back now — safety path
+/// for every close/dismiss route so closing never leaves the cursor stranded at the edge.
+fn finish_move_hold_if_active() {
+    if MOVE_HOLDING.swap(0, Ordering::SeqCst) == 1 {
+        let tx = MOVE_TAP_X.load(Ordering::SeqCst);
+        let ty = MOVE_TAP_Y.load(Ordering::SeqCst);
+        unsafe { let _ = SetCursorPos(tx, ty); }
+        println!("move: hold interrupted — cursor restored to ({tx},{ty})");
+    }
+}
+
+// ---------- Self-test probe (`--probe-move`) ----------
+// Drives the Move layer end-to-end from inside the process (posted messages, no external
+// input) so it can be verified on machines where synthetic SendInput is unreliable:
+// main panel -> Move button -> up pulse -> down pulse -> Esc -> back to main.
+static PROBE_STEP: AtomicU8 = AtomicU8::new(0); // 1 wait for move layer, 2 sample up-hold, 3 sample down-hold, 4 verify return
+static PROBE_MAIN: AtomicIsize = AtomicIsize::new(0); // main panel hwnd (probe-owned)
+static PROBE_TICKS: AtomicU32 = AtomicU32::new(0); // ticks within the current phase
+static PROBE_TOP: AtomicI32 = AtomicI32::new(0); // primary monitor top/bottom — edge bands
+static PROBE_BOT: AtomicI32 = AtomicI32::new(0);
+static PROBE_UP_EDGE: AtomicU32 = AtomicU32::new(0); // cursor samples inside the top-edge band
+static PROBE_UP_TOTAL: AtomicU32 = AtomicU32::new(0);
+static PROBE_DN_EDGE: AtomicU32 = AtomicU32::new(0);
+static PROBE_DN_TOTAL: AtomicU32 = AtomicU32::new(0);
+
+/// Arm the probe: post a click on the main panel's Move button and start the tick timer.
+pub fn probe_arm(msg_hwnd: HWND, main_hwnd: HWND) {
+    unsafe {
+        let (l, t, _r, b) = primary_monitor_rect();
+        PROBE_TOP.store(t, Ordering::SeqCst);
+        PROBE_BOT.store(b, Ordering::SeqCst);
+        let _ = l;
+        PROBE_MAIN.store(main_hwnd.0 as isize, Ordering::SeqCst);
+        // Move button center — found by action name in the main grid.
+        let (cx, cy) = buttons()
+            .iter()
+            .find(|b| b.action == "move")
+            .map(|b| {
+                let (x, y, w, h) = b.rect;
+                ((x + w / 2.0) as i32, (y + h / 2.0) as i32)
+            })
+            .unwrap_or((61, 261));
+        probe_post_click(main_hwnd, cx, cy);
+        PROBE_STEP.store(1, Ordering::SeqCst);
+        let _ = SetTimer(Some(msg_hwnd), PROBE_TIMER_ID as usize, 30, None);
+    }
+}
+
+/// One state-machine tick (PROBE_TIMER_ID on the message window).
+pub fn probe_tick() {
+    unsafe {
+        match PROBE_STEP.load(Ordering::SeqCst) {
+            1 => {
+                let mv = MOVE_HWNDA.load(Ordering::SeqCst);
+                if mv != 0 {
+                    // Up-arrow cell center.
+                    let c = move_cells()[0];
+                    let (x, y, w, h) = c.rect;
+                    probe_post_click(HWND(mv as *mut core::ffi::c_void), (x + w / 2.0) as i32, (y + h / 2.0) as i32);
+                    PROBE_TICKS.store(0, Ordering::SeqCst);
+                    PROBE_STEP.store(2, Ordering::SeqCst);
+                } else if PROBE_TICKS.fetch_add(1, Ordering::SeqCst) > 40 {
+                    probe_finish(false, "move layer did not open");
+                }
+            }
+            2 => {
+                // Cursor should be parked at the top edge during the configured dwell.
+                let p = sample_cursor();
+                PROBE_UP_TOTAL.fetch_add(1, Ordering::SeqCst);
+                if p.y <= PROBE_TOP.load(Ordering::SeqCst) + 5 {
+                    PROBE_UP_EDGE.fetch_add(1, Ordering::SeqCst);
+                }
+                if PROBE_TICKS.fetch_add(1, Ordering::SeqCst) >= 7 {
+                    let mv = HWND(MOVE_HWNDA.load(Ordering::SeqCst) as *mut core::ffi::c_void);
+                    let c = move_cells()[1]; // down-arrow cell — 2x2: index 1 = (1,2)
+                    let (x, y, w, h) = c.rect;
+                    probe_post_click(mv, (x + w / 2.0) as i32, (y + h / 2.0) as i32);
+                    PROBE_TICKS.store(0, Ordering::SeqCst);
+                    PROBE_STEP.store(3, Ordering::SeqCst);
+                }
+            }
+            3 => {
+                let p = sample_cursor();
+                PROBE_DN_TOTAL.fetch_add(1, Ordering::SeqCst);
+                if p.y >= PROBE_BOT.load(Ordering::SeqCst) - 6 {
+                    PROBE_DN_EDGE.fetch_add(1, Ordering::SeqCst);
+                }
+                if PROBE_TICKS.fetch_add(1, Ordering::SeqCst) >= 7 {
+                    let mv = HWND(MOVE_HWNDA.load(Ordering::SeqCst) as *mut core::ffi::c_void);
+                    // Esc -> close_move -> back to the main panel.
+                    let _ = PostMessageW(Some(mv), WM_KEYDOWN, WPARAM(VK_ESCAPE.0 as usize), LPARAM(0));
+                    let _ = PostMessageW(Some(mv), WM_KEYUP, WPARAM(VK_ESCAPE.0 as usize), LPARAM(0));
+                    PROBE_TICKS.store(0, Ordering::SeqCst);
+                    PROBE_STEP.store(4, Ordering::SeqCst);
+                }
+            }
+            4 => {
+                if PROBE_TICKS.fetch_add(1, Ordering::SeqCst) < 3 {
+                    return; // give close_move a moment
+                }
+                let main = HWND(PROBE_MAIN.load(Ordering::SeqCst) as *mut core::ffi::c_void);
+                let restored = MOVE_HWNDA.load(Ordering::SeqCst) == 0 && IsWindowVisible(main).as_bool();
+                probe_finish(restored, if restored { "ok" } else { "Esc did not restore the main panel" });
+            }
+            _ => {}
+        }
+    }
+}
+
+fn sample_cursor() -> POINT {
+    let mut p = POINT::default();
+    unsafe { let _ = GetCursorPos(&mut p); }
+    p
+}
+
+fn primary_monitor_rect() -> (i32, i32, i32, i32) {
+    unsafe {
+        let hm = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if GetMonitorInfoW(hm, &mut mi).as_bool() {
+            (mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right, mi.rcMonitor.bottom)
+        } else {
+            (0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))
+        }
+    }
+}
+
+fn probe_post_click(hwnd: HWND, cx: i32, cy: i32) {
+    unsafe {
+        let lp = LPARAM(((cy as u32 & 0xFFFF) << 16 | (cx as u32 & 0xFFFF)) as isize);
+        let _ = PostMessageW(Some(hwnd), WM_LBUTTONDOWN, WPARAM(1), lp);
+        let _ = PostMessageW(Some(hwnd), WM_LBUTTONUP, WPARAM(0), lp);
+    }
+}
+
+fn probe_finish(ok: bool, note: &str) {
+    unsafe { KillTimer(None, PROBE_TIMER_ID as usize); }
+    println!(
+        "probe: up-edge {}/{} samples, down-edge {}/{} samples, main restored={} ({note})",
+        PROBE_UP_EDGE.load(Ordering::SeqCst),
+        PROBE_UP_TOTAL.load(Ordering::SeqCst),
+        PROBE_DN_EDGE.load(Ordering::SeqCst),
+        PROBE_DN_TOTAL.load(Ordering::SeqCst),
+        ok,
+    );
+    println!("PROBE {}", if ok { "PASS" } else { "FAIL" });
+    std::process::exit(if ok { 0 } else { 1 });
+}
+
 /// Execute a main-panel action at anchor P: right-click, scroll up/down
-/// (SCROLL_NOTCHES wheel notches), double-click (the file-open path), or hold-2s
-/// (left-down now, left-up via HOLD2S_TIMER_ID).
+/// (config::scroll_notches() wheel notches) or hold-2s (left-down now, left-up via HOLD2S_TIMER_ID).
 fn perform_main_action(hwnd: HWND, action: &str) {
     let (px, py) = anchor();
     capture_restore(); // tap point — scroll returns the cursor here after executing
@@ -303,7 +537,7 @@ fn perform_main_action(hwnd: HWND, action: &str) {
         "scroll-up" | "scroll-down" => {
             // Windows wheel: ±120 = one notch. mouseData must be sign-extended
             // (i32 as u32) — zero-extending a negative delta yields +32767 = a huge UP scroll.
-            let delta = 120 * SCROLL_NOTCHES;
+            let delta = (120 * crate::config::scroll_notches()) as i16;
             wheel_send(if action == "scroll-up" { delta } else { -delta });
             println!("action: {} @ ({px},{py})", action);
             schedule_restore(hwnd);
@@ -319,20 +553,6 @@ fn perform_main_action(hwnd: HWND, action: &str) {
                 let _ = SetTimer(Some(hwnd), HOLD2S_TIMER_ID as usize, HOLD2S_MS, None);
             }
             println!("action: hold-2s — left-down @ ({px},{py}), up in {HOLD2S_MS}ms");
-        }
-        "double-click" => {
-            // Proper double click at P: a fast double-tap is the overlay trigger, so this
-            // button is the file-open path. ~30ms presses, ~50ms inter-click gap —
-            // well inside DCT. Marker-tagged so the hook skips our own events.
-            mouse_send(0, 0, MOUSEEVENTF_LEFTDOWN);
-            std::thread::sleep(std::time::Duration::from_millis(30));
-            mouse_send(0, 0, MOUSEEVENTF_LEFTUP);
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            mouse_send(0, 0, MOUSEEVENTF_LEFTDOWN);
-            std::thread::sleep(std::time::Duration::from_millis(30));
-            mouse_send(0, 0, MOUSEEVENTF_LEFTUP);
-            println!("action: double-click @ ({px},{py})");
-            schedule_action_close(hwnd); // one-shot — panel closes once the file-open click lands
         }
         _ => {} // unknown action
     }
@@ -428,6 +648,39 @@ fn mouse_send_abs(nx: i32, ny: i32, flags: MOUSE_EVENT_FLAGS) {
     }
 }
 
+/// Normalize an absolute screen point to the 0..65535 VIRTUAL-desktop space
+/// (same math as replay_drag — all monitors, origin at the virtual top-left).
+fn norm_virtual(x: i32, y: i32) -> (i32, i32) {
+    let (vx, vy, vw, vh) = unsafe {
+        (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+         GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN))
+    };
+    (((x - vx) as i64 * 65535 / (vw as i64 - 1)) as i32,
+     ((y - vy) as i64 * 65535 / (vh as i64 - 1)) as i32)
+}
+
+/// The edge point a move pulse targets: the middle of the given side of the monitor
+/// containing the tap point. Bottom/right use the last valid pixel row/column.
+fn edge_point(dir: u8, px: i32, py: i32) -> (i32, i32) {
+    unsafe {
+        let hm = MonitorFromPoint(POINT { x: px, y: py }, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let (l, t, r, b) = if GetMonitorInfoW(hm, &mut mi).as_bool() {
+            (mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right, mi.rcMonitor.bottom)
+        } else {
+            (0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))
+        };
+        let cx = l + (r - l) / 2;
+        let cy = t + (b - t) / 2;
+        match dir {
+            0 => (cx, t),     // up — top edge center
+            3 => (cx, b - 1), // down — bottom edge
+            5 => (l, cy),     // left
+            _ => (r - 1, cy), // right
+        }
+    }
+}
+
 // ---------- colors (straight ARGB, 0xAARRGGBB) ----------
 // main panel — purple/lavender theme (shared with the settings window)
 pub(crate) const PANEL_BG: u32 = 0x661A1033; // ~40% opaque dark-purple panel — clearly see-through
@@ -440,6 +693,12 @@ const DPAD_PANEL_BG: u32 = 0x660C2B2E; // ~40% opaque dark-teal panel
 const DPAD_BTN_FILL: u32 = 0x8C11555A; // ~55% opaque mid-teal — background visible through buttons
 const DPAD_PRESSED: u32 = 0xFF2DD4BF; // teal-300 accent
 const DPAD_ICON_DARK: u32 = 0xFF0B3236; // dark teal, for icons on the pressed fill
+
+// move layer — amber tone (deliberately different from main lavender and dpad teal)
+const MOVE_PANEL_BG: u32 = 0x662B1F0C; // ~40% opaque dark warm-brown panel
+const MOVE_BTN_FILL: u32 = 0x8C4A3811; // ~55% opaque mid amber-brown — background visible through buttons
+const MOVE_ACCENT: u32 = 0xFFFBBF24; // amber-400 accent (pressed fill)
+const MOVE_ICON_DARK: u32 = 0xFF2B1F0C; // dark brown, for icons on the pressed fill
 
 #[inline]
 fn a(c: u32) -> f64 { ((c >> 24) & 0xFF) as f64 / 255.0 }
@@ -546,15 +805,17 @@ pub(crate) fn stroke_rounded(buf: &mut [u32], img_w: i32, img_h: i32, rect: (f64
     }
 }
 
-/// Double-click glyph: two overlapping rings — "twice".
-fn draw_double(buf: &mut [u32], img_w: i32, img_h: i32, btn: &Btn, color: u32) {
+/// Edge-move glyph: rounded square (the screen) with four arrows pointing out of its edges.
+fn draw_move_edge(buf: &mut [u32], img_w: i32, img_h: i32, btn: &Btn, color: u32) {
     let (x, y, w, h) = btn.rect;
     let cx = x + w / 2.0;
     let cy = y + h * 0.42; // leave room for the label below
-    const R: f64 = 7.5;
-    const S: f64 = 2.5;
-    draw_ring(buf, img_w, img_h, cx - 6.0, cy, R, S, color);
-    draw_ring(buf, img_w, img_h, cx + 6.0, cy, R, S, color);
+    const S: f64 = 13.0; // half-size of the screen square
+    stroke_rounded(buf, img_w, img_h, (cx - S, cy - S, 2.0 * S, 2.0 * S), 4.0, 2.5, color);
+    draw_arrow(buf, img_w, img_h, cx, cy - S - 2.0, 0, 13.0, color); // up
+    draw_arrow(buf, img_w, img_h, cx, cy + S + 2.0, 3, 13.0, color); // down
+    draw_arrow(buf, img_w, img_h, cx - S - 2.0, cy, 5, 13.0, color); // left
+    draw_arrow(buf, img_w, img_h, cx + S + 2.0, cy, 2, 13.0, color); // right
 }
 
 /// Antialiased chevron (two segments), centered in the button's icon area.
@@ -703,7 +964,7 @@ fn render_main(pressed: &[u8]) -> Vec<u32> {
             2 => draw_mouse(&mut buf, w, h, btn, col), // right-click
             3 => draw_clock(&mut buf, w, h, btn, col), // hold-2s
             5 => draw_move(&mut buf, w, h, btn, col), // drag entry
-            6 => draw_double(&mut buf, w, h, btn, col), // double-click
+            7 => draw_move_edge(&mut buf, w, h, btn, col), // edge-move entry
             _ => {} // no icon
         }
     }
@@ -922,11 +1183,44 @@ pub fn repaint_dpad(hwnd: HWND) -> Result<()> {
     }
 }
 
+/// Render the Move layer (amber, 2x2 grid — arrows are self-evident, no labels).
+fn render_move(pressed: &[u8]) -> Vec<u32> {
+    let (w, h) = MOVE_SIZE;
+    let mut buf = vec![0u32; (w * h) as usize];
+
+    // Amber tone — deliberately distinct from main (lavender) and dpad (teal).
+    fill_rounded(&mut buf, w, h, (0.0, 0.0, w as f64, h as f64), PANEL_RADIUS, MOVE_PANEL_BG);
+
+    for (i, cell) in move_cells().iter().enumerate() {
+        let is_p = is_pressed(pressed, i);
+        fill_rounded(&mut buf, w, h, cell.rect, BTN_RADIUS, if is_p { MOVE_ACCENT } else { MOVE_BTN_FILL });
+        if !is_p {
+            stroke_rounded(&mut buf, w, h, cell.rect, BTN_RADIUS, 1.2, 0x40FBBF24);
+        }
+        let col = if is_p { MOVE_ICON_DARK } else { ICON_WHITE };
+        let (x, y, cw, ch) = cell.rect;
+        draw_arrow(&mut buf, w, h, x + cw / 2.0, y + ch * 0.45, cell.dir, 32.0, col);
+    }
+
+    buf
+}
+
+/// Repaint the Move layer (amber).
+pub fn repaint_move(hwnd: HWND) -> Result<()> {
+    unsafe {
+        let mut pressed = Vec::new();
+        if MOVE_PRESSED.load(Ordering::SeqCst) != 255 {
+            pressed.push(MOVE_PRESSED.load(Ordering::SeqCst));
+        }
+        blit(hwnd, MOVE_SIZE.0, MOVE_SIZE.1, render_move(&pressed), &[], &[], 15, false)
+    }
+}
+
 // ---------- window class + message loop glue ----------
 
 fn kill_all_timers(hwnd: HWND) {
     unsafe {
-        for id in [HOLD_TIMER_ID, REPEAT_TIMER_ID, HOLD2S_TIMER_ID, FLASH_TIMER_ID, RESTORE_TIMER_ID, ACTION_CLOSE_TIMER_ID] {
+        for id in [HOLD_TIMER_ID, REPEAT_TIMER_ID, HOLD2S_TIMER_ID, FLASH_TIMER_ID, RESTORE_TIMER_ID, ACTION_CLOSE_TIMER_ID, MOVE_HOLD_TIMER_ID] {
             let _ = KillTimer(Some(hwnd), id as usize);
         }
     }
@@ -961,6 +1255,7 @@ fn close_app(hwnd: HWND) {
         let _ = DestroyWindow(hwnd);
         MAIN_HWNDA.store(0, Ordering::SeqCst);
         DPAD_HWNDA.store(0, Ordering::SeqCst);
+        MOVE_HWNDA.store(0, Ordering::SeqCst);
         VISIBLE_HWND.store(0, Ordering::SeqCst);
         PostQuitMessage(0);
     }
@@ -986,6 +1281,7 @@ pub fn is_visible() -> bool {
 pub fn dismiss_all(reason: &str) {
     unsafe {
         release_hold_if_active(); // close mid-hold — don't leave the button down
+        finish_move_hold_if_active(); // close mid-pulse — don't strand the cursor at the edge
         let vh = HWND(VISIBLE_HWND.load(Ordering::SeqCst) as *mut core::ffi::c_void);
         if !vh.is_invalid() {
             kill_all_timers(vh);
@@ -998,6 +1294,7 @@ pub fn dismiss_all(reason: &str) {
         }
         MAIN_HWNDA.store(0, Ordering::SeqCst);
         DPAD_HWNDA.store(0, Ordering::SeqCst);
+        MOVE_HWNDA.store(0, Ordering::SeqCst);
         VISIBLE_HWND.store(0, Ordering::SeqCst);
     }
     kill_idle_timer();
@@ -1032,6 +1329,22 @@ fn close_dpad(dh: HWND) {
         kill_all_timers(dh);
         let _ = DestroyWindow(dh);
         DPAD_HWNDA.store(0, Ordering::SeqCst);
+        let mh = HWND(MAIN_HWNDA.load(Ordering::SeqCst) as *mut core::ffi::c_void);
+        if !mh.is_invalid() {
+            restart_main(mh);
+        }
+    }
+}
+
+/// Close the Move layer and return to the main panel. A mid-hold pulse restores the
+/// cursor first — never leave it stranded at the screen edge.
+fn close_move(mv: HWND) {
+    finish_move_hold_if_active();
+    unsafe {
+        kill_all_timers(mv);
+        let _ = DestroyWindow(mv);
+        MOVE_HWNDA.store(0, Ordering::SeqCst);
+        println!("move: closed — back to main");
         let mh = HWND(MAIN_HWNDA.load(Ordering::SeqCst) as *mut core::ffi::c_void);
         if !mh.is_invalid() {
             restart_main(mh);
@@ -1087,6 +1400,28 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                             }
                         }
                         Err(_) => restart_main(hwnd), // dpad creation failed — restore main
+                    }
+                } else if action == "move" {
+                    // Open the Move layer in place of the main panel.
+                    let _ = repaint(hwnd);
+                    let (px, py) = anchor();
+                    let (dx, dy) = position_for_size(px, py, MOVE_SIZE);
+                    MAIN_HWNDA.store(hwnd.0 as isize, Ordering::SeqCst);
+                    PENDING_ACTION.store(255, Ordering::SeqCst); // main hidden — stale action must not fire
+                    release_hold_if_active(); // main is about to hide — finish any hold now
+                    kill_all_timers(hwnd); // don't run while hidden
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                    match create_move(dx, dy) {
+                        Ok(mv) => {
+                            if repaint_move(mv).is_ok() {
+                                MOVE_HWNDA.store(mv.0 as isize, Ordering::SeqCst);
+                                let _ = ShowWindow(mv, SW_SHOW);
+                                set_visible(mv);
+                            } else {
+                                restart_main(hwnd); // blit failed — restore main
+                            }
+                        }
+                        Err(_) => restart_main(hwnd), // move layer creation failed — restore main
                     }
                 } else if action == "hold-2s" {
                     perform_main_action(hwnd, action); // hold must start on press — execute now
@@ -1225,6 +1560,73 @@ unsafe extern "system" fn dpad_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
         }
         WM_KEYDOWN if wparam.0 as u16 == VK_ESCAPE.0 => {
             close_dpad(hwnd);
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+unsafe extern "system" fn move_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_LBUTTONDOWN => {
+            let lp = lparam.0;
+            let p = POINT {
+                x: (lp & 0xFFFF) as i16 as i32,
+                y: ((lp >> 16) & 0xFFFF) as i16 as i32,
+            };
+            if let Some(i) = move_hit_test(p) {
+                reset_idle_timer();
+                // Tap point in SCREEN coords (lparam is client) — the pulse's restore target.
+                let mut sp = p;
+                let _ = ClientToScreen(hwnd, &mut sp);
+                MOVE_TAP_X.store(sp.x, Ordering::SeqCst);
+                MOVE_TAP_Y.store(sp.y, Ordering::SeqCst);
+                MOVE_PRESSED.store(i as u8, Ordering::SeqCst);
+                println!("tap: move-{} @ ({}, {})", move_dir_name(move_cells()[i].dir), p.x, p.y);
+                unsafe {
+                    let _ = KillTimer(Some(hwnd), FLASH_TIMER_ID as usize);
+                    let _ = SetTimer(Some(hwnd), FLASH_TIMER_ID as usize, FLASH_MS, None); // LUP-miss fallback
+                }
+                MOVE_PENDING.store(i as u8, Ordering::SeqCst); // defer the pulse to button-up
+                let _ = repaint_move(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            if MOVE_PRESSED.load(Ordering::SeqCst) != 255 {
+                MOVE_PRESSED.store(255, Ordering::SeqCst);
+                let _ = repaint_move(hwnd);
+            }
+            unsafe { let _ = KillTimer(Some(hwnd), FLASH_TIMER_ID as usize); }
+            if MOVE_PENDING.load(Ordering::SeqCst) != 255 {
+                // Execute at release: the cursor is still on the button, so Moonlight's
+                // release can't land outside the panel and dismiss the layer mid-pulse.
+                let i = MOVE_PENDING.swap(255, Ordering::SeqCst) as usize;
+                perform_move_action(hwnd, move_cells()[i].dir);
+            }
+            LRESULT(0)
+        }
+        WM_TIMER => {
+            let id = wparam.0 as u32;
+            match id {
+                FLASH_TIMER_ID => {
+                    // LUP never reached us (capture miss) — run the pending pulse anyway.
+                    if MOVE_PENDING.load(Ordering::SeqCst) != 255 {
+                        let i = MOVE_PENDING.swap(255, Ordering::SeqCst) as usize;
+                        perform_move_action(hwnd, move_cells()[i].dir);
+                    }
+                    LRESULT(0)
+                }
+                MOVE_HOLD_TIMER_ID => {
+                    do_move_restore();
+                    LRESULT(0)
+                }
+                _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+            }
+        }
+        WM_KEYDOWN if wparam.0 as u16 == VK_ESCAPE.0 => {
+            close_move(hwnd);
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
@@ -1440,5 +1842,75 @@ pub fn create_dpad(x: i32, y: i32) -> Result<HWND> {
             Some(hinst),
             None,
         )
+    }
+}
+
+/// Create the Move layer (lavender cross) window at (x, y).
+pub fn create_move(x: i32, y: i32) -> Result<HWND> {
+    unsafe {
+        let hinst = GetModuleHandleW(None)?.into();
+
+        let mut wc = WNDCLASSEXW::default();
+        wc.cbSize = std::mem::size_of::<WNDCLASSEXW>() as u32;
+        wc.lpszClassName = w!("TapKeyMove");
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = Some(move_wnd_proc);
+        wc.hInstance = hinst;
+        wc.hCursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default(); // see create_overlay
+        RegisterClassExW(&mut wc);
+
+        CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            w!("TapKeyMove"),
+            w!("TapKey Move"),
+            WS_POPUP,
+            x,
+            y,
+            MOVE_SIZE.0,
+            MOVE_SIZE.1,
+            None,
+            None,
+            Some(hinst),
+            None,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn move_layer_is_2x2_grid_with_90px_cells() {
+        assert_eq!(MOVE_SIZE, (224, 224));
+        let cells = move_cells();
+        // (1,1)=up (1,2)=down (2,1)=left (2,2)=right — no diagonals.
+        let centers: [(f64, f64); 4] = [
+            (cells[0].rect.0 as f64 + cells[0].rect.2 / 2.0, cells[0].rect.1 as f64 + cells[0].rect.3 / 2.0),
+            (cells[1].rect.0 as f64 + cells[1].rect.2 / 2.0, cells[1].rect.1 as f64 + cells[1].rect.3 / 2.0),
+            (cells[2].rect.0 as f64 + cells[2].rect.2 / 2.0, cells[2].rect.1 as f64 + cells[2].rect.3 / 2.0),
+            (cells[3].rect.0 as f64 + cells[3].rect.2 / 2.0, cells[3].rect.1 as f64 + cells[3].rect.3 / 2.0),
+        ];
+        assert_eq!(centers[0], (61.0, 61.0));   // up:     top-left
+        assert_eq!(centers[1], (163.0, 61.0));  // down:    top-right
+        assert_eq!(centers[2], (61.0, 163.0));  // left:    bottom-left
+        assert_eq!(centers[3], (163.0, 163.0)); // right:   bottom-right
+        for c in &cells {
+            assert!((c.rect.2 - 90.0).abs() < f64::EPSILON); // square 90px cells
+        }
+    }
+
+    #[test]
+    fn move_hit_test_maps_taps_to_directions() {
+        let p = |x: i32, y: i32| POINT { x, y };
+        assert_eq!(move_hit_test(p(61, 61)), Some(0));  // up
+        assert_eq!(move_hit_test(p(163, 61)), Some(1));  // down
+        assert_eq!(move_hit_test(p(61, 163)), Some(2));  // left
+        assert_eq!(move_hit_test(p(163, 163)), Some(3)); // right
+        // gaps and padding are not interactive
+        assert_eq!(move_hit_test(p(109, 61)), None);    // vertical gap between columns
+        assert_eq!(move_hit_test(p(61, 109)), None);    // horizontal gap between rows
+        assert_eq!(move_hit_test(p(8, 61)), None);      // padding
+        assert_eq!(move_hit_test(p(223, 223)), None);   // bottom-right corner
     }
 }
