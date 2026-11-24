@@ -92,6 +92,11 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             }
         }
         if wparam.0 == WM_LBUTTONDOWN as usize && s.dwExtraInfo != EXTRA_MARKER as usize {
+            // Settings window taps are inert to TapKey — the settings window consumes
+            // them (no detection, no outside-click dismiss, no armed t1 left behind).
+            if crate::settings::point_in_settings(s.pt.x, s.pt.y) {
+                *LAST.lock().unwrap() = None;
+            } else {
             // Outside-click dismiss: while a layer is visible, a click outside
             // it closes everything. The click itself passes through to whatever is underneath.
             let g = GUARD_HWND.load(Ordering::SeqCst);
@@ -101,10 +106,11 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                     unsafe { let _ = PostMessageW(None, WM_TAPKEY_OUTSIDE, WPARAM(0), LPARAM(0)); }
                 }
             } else if DETECTION_ON.load(Ordering::Acquire)
-                && crate::config::detection_enabled() // global pause (settings window / tray state)
+                && crate::config::detection_enabled() // global pause (settings toggle / tray state)
                 && on_tap_down(s.pt.x, s.pt.y) == TapVerdict::Swallow
             {
                 return LRESULT(1); // nonzero blocks t2 (WH_MOUSE_LL: 0 passes, nonzero swallows)
+            }
             }
         }
     }

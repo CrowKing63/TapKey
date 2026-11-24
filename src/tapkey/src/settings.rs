@@ -8,8 +8,10 @@
 //! tapkey.toml immediately — no save button. A failed write shows a status and
 //! warns at exit; values stay live in memory either way.
 //!
-//! While this window is open, tap detection is suspended so button taps never trigger
-//! the overlay. Closing resumes detection (the global pause flag is separate).
+//! While this window is open, taps landing inside it are inert to the hook (the settings
+//! window consumes them — no detection, no outside-click dismiss); taps outside it still
+//! trigger the overlay. Closing resumes nothing explicitly — detection naturally resumes
+//! when the overlay closes (the global pause flag is separate).
 
 use std::sync::atomic::{AtomicIsize, AtomicU8, Ordering};
 
@@ -72,6 +74,18 @@ fn hit_test(p: POINT) -> Option<usize> {
 
 fn settings_hwnd() -> HWND {
     HWND(SETTINGS_HWND.load(Ordering::SeqCst) as *mut core::ffi::c_void)
+}
+
+/// Is (x,y) inside the settings window's current screen rect? (0-size when closed.)
+pub fn point_in_settings(x: i32, y: i32) -> bool {
+    let h = settings_hwnd();
+    if h.is_invalid() {
+        return false;
+    }
+    unsafe {
+        let mut r = RECT::default();
+        GetWindowRect(h, &mut r).is_ok() && x >= r.left && x < r.right && y >= r.top && y < r.bottom
+    }
 }
 
 // ---------- render ----------
@@ -203,12 +217,12 @@ fn close_settings(hwnd: HWND) {
     SETTINGS_HWND.store(0, Ordering::SeqCst);
     FLASH.store(255, Ordering::SeqCst);
     STATUS.store(0, Ordering::SeqCst);
-    crate::hook::detection_set(true); // resume (global pause flag stays as configured)
     println!("settings: closed");
 }
 
 /// Open from the tray (one tap). Already open → bring to front. Opening dismisses any
-/// overlay layer and suspends detection so settings taps never trigger the overlay.
+/// currently open overlay layer; taps inside the settings window are inert to the hook
+/// (settings consumes them), taps outside it still trigger the overlay.
 pub fn open() {
     let existing = settings_hwnd();
     if !existing.is_invalid() {
@@ -221,7 +235,6 @@ pub fn open() {
     if crate::overlay::is_visible() {
         crate::overlay::dismiss_all("settings open");
     }
-    crate::hook::detection_set(false);
     FLASH.store(255, Ordering::SeqCst);
     STATUS.store(0, Ordering::SeqCst);
 
@@ -234,7 +247,6 @@ pub fn open() {
             if repaint(hwnd).is_err() {
                 println!("settings: first blit failed — closing");
                 unsafe { let _ = DestroyWindow(hwnd); }
-                crate::hook::detection_set(true);
                 return;
             }
             SETTINGS_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
@@ -248,7 +260,6 @@ pub fn open() {
         }
         Err(e) => {
             println!("settings: create failed: {e:?}");
-            crate::hook::detection_set(true);
         }
     }
 }
