@@ -276,8 +276,11 @@ it is a reading surface. 360×388, screen-centered, 19 px semibold labels.
 - **Auto-save:** every change applies via atomics AND persists to `tapkey.toml`
   immediately — no save button. Failed write → "Save failed" status + exit warning;
   values stay live in memory either way.
-- Opening dismisses any overlay layer and suspends detection (settings taps never
-  trigger the overlay); closing resumes detection.
+- Opening dismisses any overlay layer; detection stays enabled, but taps landing
+  inside the settings window are inert to the hook (no detection, no outside-click
+  dismiss, no armed t1) so settings taps never trigger the overlay. Taps outside the
+  settings window trigger normally (the overlay opens above the settings window).
+  Closing leaves the overlay (and its own detection suspend) untouched.
 
 ### 6.4 Tray — pure launcher
 
